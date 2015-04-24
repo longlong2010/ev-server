@@ -1,6 +1,7 @@
 #include <event.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <queue>
 
 #define THREAD_NUM 12
 
@@ -13,7 +14,39 @@ struct thread {
 	int notify_send_fd;
 };
 
+class conn {
+
+};
+
+class conn_queue {
+private:
+	std::queue<conn*> q;
+	pthread_mutex_t lock;
+public:
+	conn_queue() {
+		pthread_mutex_init(&lock, NULL);
+	}
+
+	void push(conn* c) {
+		pthread_mutex_lock(&lock);
+		q.push(c);	
+		pthread_mutex_unlock(&lock);
+	}
+
+	conn* pop() {
+		conn* c = NULL;
+		pthread_mutex_lock(&lock);
+		if (!q.empty()) {
+			c = q.front();
+			q.pop();
+		}
+		pthread_mutex_unlock(&lock);
+		return c;
+	}
+};
+
 static thread* threads;
+static conn_queue queue;
 static struct event_base *main_base;
 static int last_thread = -1;
 static int init_count = 0;
