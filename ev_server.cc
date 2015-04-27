@@ -4,6 +4,7 @@
 #include <queue>
 
 #define THREAD_NUM 12
+#define MAX_CONNS 1024
 
 struct thread {
 	pthread_t pid;
@@ -15,8 +16,39 @@ struct thread {
 };
 
 class conn {
+public:
+	struct event_base* base;
+	struct event event;
+	int sfd;
+	short which;
 
+	static void event_handler(const int fd, const short which, void* arg) {
+		conn *c;
+		c = (conn*) arg;
+		c->which = which;
+	}
+
+	static conn* conn_new(const int sfd, const int event_flags, struct event_base* base) {
+		conn* c;
+		c = conns[sfd];
+		if (c == NULL) {
+			c = new conn();
+			c->sfd = sfd;
+			c->base = base;
+
+			conns[sfd] = c;
+		}
+
+		event_set(&c->event, sfd, event_flags, event_handler, (void*)c);
+
+		return c;
+	}
+	static conn** conns;
+private:
+	conn() {
+	}
 };
+conn** conn::conns = new conn*[MAX_CONNS];
 
 class conn_queue {
 private:
@@ -151,7 +183,6 @@ int main() {
 	main_base = event_init();
 	thread_init(THREAD_NUM, main_base);
 	int sfd = server_socket("127.0.0.1", 11212);
-	
 	struct event listen_ev;
 	event_set(&listen_ev, sfd, EV_READ | EV_PERSIST, base_event_handler, NULL);
 	event_base_set(main_base, &listen_ev);
