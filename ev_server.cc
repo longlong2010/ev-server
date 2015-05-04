@@ -6,15 +6,6 @@
 #define THREAD_NUM 12
 #define MAX_CONNS 1024
 
-struct thread {
-	pthread_t pid;
-	struct event_base *base;
-	struct event notify_event;
-	
-	int notify_receive_fd;
-	int notify_send_fd;
-};
-
 class conn {
 public:
 	struct event_base* base;
@@ -50,23 +41,29 @@ private:
 };
 conn** conn::conns = new conn*[MAX_CONNS];
 
+class cq_item {
+public:
+	int sfd;
+	int event_flags;
+};
+
 class conn_queue {
 private:
-	std::queue<conn*> q;
+	std::queue<cq_item*> q;
 	pthread_mutex_t lock;
 public:
 	conn_queue() {
 		pthread_mutex_init(&lock, NULL);
 	}
 
-	void push(conn* c) {
+	void push(cq_item* item) {
 		pthread_mutex_lock(&lock);
-		q.push(c);	
+		q.push(item);	
 		pthread_mutex_unlock(&lock);
 	}
 
-	conn* pop() {
-		conn* c = NULL;
+	cq_item* pop() {
+		cq_item* c = NULL;
 		pthread_mutex_lock(&lock);
 		if (!q.empty()) {
 			c = q.front();
@@ -76,6 +73,18 @@ public:
 		return c;
 	}
 };
+
+struct thread {
+	pthread_t pid;
+	struct event_base *base;
+	struct event notify_event;
+	
+	int notify_receive_fd;
+	int notify_send_fd;
+	
+	conn_queue queue;
+};
+
 
 static thread* threads;
 static conn_queue queue;
@@ -175,7 +184,12 @@ void base_event_handler(int sock, short event, void* arg) {
     int tid = (last_thread + 1) % THREAD_NUM;
     thread* thread = threads + tid;
     last_thread = tid;
-    
+	
+	cq_item* item = new cq_item();
+	item->sfd = newfd;
+	item->event_flags = EV_READ | EV_PERSIST; 
+	thread->queue.push(item);
+
 	write(thread->notify_send_fd, "K", 1); 
 }
 
