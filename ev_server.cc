@@ -1,49 +1,37 @@
 #include <event.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <assert.h>
+
 #include <queue>
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define THREAD_NUM 12
 #define MAX_CONNS 1024
+#define BACKLOG 1024
 
-class conn {
-public:
-	struct event_base* base;
-	struct event event;
-	int sfd;
-	short which;
 
-	static void event_handler(const int fd, const short which, void* arg) {
-		conn *c;
-		c = (conn*) arg;
-		c->which = which;
-	}
-
-	static conn* conn_new(const int sfd, const int event_flags, struct event_base* base) {
-		conn* c;
-		c = conns[sfd];
-		if (c == NULL) {
-			c = new conn();
-			c->sfd = sfd;
-			c->base = base;
-
-			conns[sfd] = c;
-		}
-
-		event_set(&c->event, sfd, event_flags, event_handler, (void*)c);
-
-		return c;
-	}
-	static conn** conns;
-private:
-	conn() {
-	}
+enum conn_states {
+    conn_new_cmd,    /**< Prepare connection for next command */
+    conn_waiting,    /**< waiting for a readable socket */
+    conn_read,       /**< reading in a command line */
+    conn_parse_cmd,  /**< try to parse a command from the input buffer */
+    conn_write,      /**< writing out a simple response */
+    conn_nread,      /**< reading in a fixed number of bytes */
+    conn_swallow,    /**< swallowing unnecessary bytes w/o storing */
+    conn_closing,    /**< closing this connection */
+    conn_mwrite,     /**< writing out many items sequentially */
+    conn_closed,     /**< connection is closed */
+    conn_max_state   /**< Max state value (used for assertion) */
 };
-conn** conn::conns = new conn*[MAX_CONNS];
 
 class cq_item {
 public:
 	int sfd;
+	enum conn_states init_state;
 	int event_flags;
 };
 
@@ -85,8 +73,66 @@ struct thread {
 	conn_queue queue;
 };
 
+class conn {
+public:
+	struct event_base* base;
+	struct event event;
+	int sfd;
+	short which;
+	enum conn_states state;
+	struct thread* thread;
 
-static thread* threads;
+	static void event_handler(const int fd, const short which, void* arg) {
+		conn *c;
+		c = (conn*) arg;
+		assert(c != NULL);
+
+		c->which = which;
+		
+		if (fd != c->sfd) {
+			conn_close(c);
+			return;
+		}
+
+		bool stop = false;
+		while (!stop) {
+			switch (c->state) {
+			}
+		}
+	}
+
+	static conn* conn_new(const int sfd, enum conn_states init_state, const int event_flags, struct event_base* base) {
+		conn* c;
+		c = conns[sfd];
+		if (c == NULL) {
+			c = new conn();
+			c->sfd = sfd;
+			c->base = base;
+			
+			c->state = init_state;
+			conns[sfd] = c;
+		}
+
+		event_set(&c->event, sfd, event_flags, event_handler, (void*)c);
+
+		return c;
+	}
+
+	static void conn_close(conn* c) {
+		assert(c != NULL);
+		event_del(&c->event);
+
+		close(c->sfd);
+	}
+	static conn** conns;
+private:
+	conn() {
+	}
+};
+conn** conn::conns = new conn*[MAX_CONNS];
+
+
+static struct thread* threads;
 static conn_queue queue;
 static struct event_base *main_base;
 static int last_thread = -1;
@@ -112,14 +158,27 @@ void register_thread_initialized(void) {
     pthread_mutex_unlock(&worker_hang_lock);
 }
 
-void thread_libevent_process(int sock, short event, void* arg) {
-	thread* me = (thread*) arg;
+void thread_libevent_process(int sock, short which, void* arg) {
+	struct thread* me = (struct thread*) arg;
+	cq_item* item;
 	char buf[1];
+
 	read(sock, buf, 1);
 	printf("%s\n", buf);
+	switch (buf[0]) {
+		case 'c':
+		item = me->queue.pop();
+		if (item != NULL) {
+			conn* c = conn::conn_new(item->sfd, item->init_state, item->event_flags, me->base);
+			if (c != NULL) {
+				c->thread = me;
+			}
+			delete item;
+		}
+	}
 }
 
-void setup_thread(thread* me) {
+void setup_thread(struct thread* me) {
 	me->base = event_init();
 
 	event_set(&me->notify_event, me->notify_receive_fd, EV_READ | EV_PERSIST, thread_libevent_process, me);
@@ -130,7 +189,7 @@ void setup_thread(thread* me) {
 }
 
 void* worker_libevent(void* arg) {
-	thread* me = (thread*) arg;
+	struct thread* me = (struct thread*) arg;
 	event_base_loop(me->base, 0);
 
 	return NULL;
@@ -167,30 +226,39 @@ int server_socket(const char* interface, int port) {
 	struct sockaddr_in addr;
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(port);
-	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_addr.s_addr = inet_addr(interface);
 
 	bind(sfd, (struct sockaddr*) &addr, sizeof(struct sockaddr));
-	listen(sfd, 1024);
+	listen(sfd, BACKLOG);
 	return sfd;
+}
+
+void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags) {
+    int tid = (last_thread + 1) % THREAD_NUM;
+    struct thread* thread = threads + tid;
+    last_thread = tid;
+	
+	cq_item* item = new cq_item();
+	
+	item->sfd = sfd;
+	item->init_state = init_state;
+	item->event_flags = event_flags;
+	
+	thread->queue.push(item);
+
+	char buf[1];
+	buf[0] = 'c';
+	write(thread->notify_send_fd, buf, 1); 
 }
 
 void base_event_handler(int sock, short event, void* arg) {
     struct sockaddr_in cli_addr;
-    int newfd;
+    int sfd;
     socklen_t sin_size;
     sin_size = sizeof(struct sockaddr_in);
-    newfd = accept(sock, (struct sockaddr*)&cli_addr, &sin_size);
+    sfd = accept(sock, (struct sockaddr*)&cli_addr, &sin_size);
 
-    int tid = (last_thread + 1) % THREAD_NUM;
-    thread* thread = threads + tid;
-    last_thread = tid;
-	
-	cq_item* item = new cq_item();
-	item->sfd = newfd;
-	item->event_flags = EV_READ | EV_PERSIST; 
-	thread->queue.push(item);
-
-	write(thread->notify_send_fd, "K", 1); 
+	dispatch_conn_new(sfd, conn_new_cmd, EV_READ | EV_PERSIST);
 }
 
 int main() {
