@@ -9,10 +9,12 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#include <cstring>
+
 #define THREAD_NUM 12
 #define MAX_CONNS 1024
 #define BACKLOG 1024
-
+#define DATA_BUFFER_SIZE 2048
 
 enum conn_states {
     conn_new_cmd,    /**< Prepare connection for next command */
@@ -81,6 +83,7 @@ public:
 	short which;
 	enum conn_states state;
 	struct thread* thread;
+	int ev_flags;
 
 	char* rbuf;
 	char* rcurr;
@@ -99,6 +102,13 @@ public:
 	int try_read_command() {
 		char* el;
 		char* cont;
+		
+		if (rbytes == 0) {
+			return 0;
+		}
+
+		el = (char*) memchr(rcurr, '\n', rbytes);
+
 
 		return 0;	
 	}
@@ -116,7 +126,6 @@ public:
 		}
 
 		bool stop = false;
-
 		while (!stop) {
 			switch (c->state) {
 				case conn_new_cmd:
@@ -133,6 +142,7 @@ public:
 					stop = true;
 					break;
 			}
+			break;
 		}
 	}
 
@@ -141,15 +151,31 @@ public:
 		c = conns[sfd];
 		if (c == NULL) {
 			c = new conn();
-			c->sfd = sfd;
+			
 			c->base = base;
 			
-			c->state = init_state;
+			c->rbuf = c->wbuf = 0;
+			
+			c->rsize = DATA_BUFFER_SIZE;
+			c->wsize = DATA_BUFFER_SIZE;
+
+			c->rbuf = new char[c->rsize];
+			c->wbuf = new char[c->wsize];
+
+			c->sfd = sfd;
 			conns[sfd] = c;
 		}
 
-		event_set(&c->event, sfd, event_flags, event_handler, (void*)c);
+		c->state = init_state;
+		c->rbytes = c->wbytes = 0;
+		c->wcurr = c->wbuf;
+		c->rcurr = c->rbuf;
 
+		event_set(&c->event, sfd, event_flags, event_handler, (void*)c);
+		event_base_set(base, &c->event);
+		c->ev_flags = event_flags;
+		
+		event_add(&c->event, 0);
 		return c;
 	}
 
@@ -199,7 +225,7 @@ void thread_libevent_process(int sock, short which, void* arg) {
 	char buf[1];
 
 	read(sock, buf, 1);
-	printf("%s\n", buf);
+	printf("%c\n", buf[0]);
 	switch (buf[0]) {
 		case 'c':
 		item = me->queue.pop();
