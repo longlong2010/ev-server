@@ -82,6 +82,27 @@ public:
 	enum conn_states state;
 	struct thread* thread;
 
+	char* rbuf;
+	char* rcurr;
+	int rsize;
+	int rbytes;
+
+    char *wbuf;
+    char *wcurr;
+    int wsize;
+    int wbytes;
+
+	void set_state(enum conn_states state) {
+		this->state = state;
+	}
+
+	int try_read_command() {
+		char* el;
+		char* cont;
+
+		return 0;	
+	}
+
 	static void event_handler(const int fd, const short which, void* arg) {
 		conn *c;
 		c = (conn*) arg;
@@ -95,8 +116,22 @@ public:
 		}
 
 		bool stop = false;
+
 		while (!stop) {
 			switch (c->state) {
+				case conn_new_cmd:
+					c->set_state(conn_parse_cmd);		
+					break;
+
+				case conn_parse_cmd:
+					if (c->try_read_command() == 0) {
+						c->set_state(conn_waiting);
+					}
+					break;
+
+				case conn_closing:
+					stop = true;
+					break;
 			}
 		}
 	}
