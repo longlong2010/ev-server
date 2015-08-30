@@ -30,6 +30,13 @@ enum conn_states {
     conn_max_state   /**< Max state value (used for assertion) */
 };
 
+enum try_read_result {
+	READ_DATA_RECEIVED,
+	READ_NO_DATA_RECEIVED,
+	READ_ERROR,            /** an error occurred (on the socket) (or client closed connection) */
+	READ_MEMORY_ERROR      /** failed to allocate more memory */
+};
+
 class cq_item {
 public:
 	int sfd;
@@ -109,8 +116,37 @@ public:
 
 		el = (char*) memchr(rcurr, '\n', rbytes);
 
-
 		return 0;	
+	}
+
+	enum try_read_result try_read_network() {
+		enum try_read_result gotdata = READ_NO_DATA_RECEIVED;
+		int buf[255];
+		int n;
+		do {
+			n = read(sfd, buf, 255);
+			if (n > 0) {
+				printf("%s\n", buf);
+			}
+		} while (n > 0);
+		return gotdata;
+	}
+
+	bool update_event(const int new_flags) {
+		struct event_base *base = event.ev_base;
+		if (ev_flags == new_flags) {
+			return true;
+		}
+		if (event_del(&event) == -1) {
+			return false;
+		}
+		event_set(&event, sfd, new_flags, event_handler, (void *) this);
+		event_base_set(base, &event);
+		ev_flags = new_flags;
+		if (event_add(&event, 0) == -1) {
+			return false;
+		}
+		return true;
 	}
 
 	static void event_handler(const int fd, const short which, void* arg) {
@@ -131,14 +167,23 @@ public:
 				case conn_new_cmd:
 					c->set_state(conn_parse_cmd);		
 					break;
-
 				case conn_parse_cmd:
 					if (c->try_read_command() == 0) {
 						c->set_state(conn_waiting);
 					}
 					break;
-
+				case conn_waiting:
+					if (!c->update_event(EV_READ | EV_PERSIST)) {
+						c->set_state(conn_closing);
+					}
+					c->set_state(conn_read);
+					stop = true;
+					break;
+				case conn_read:
+					c->try_read_network();	
+					break;
 				case conn_closing:
+					conn::conn_close(c);
 					stop = true;
 					break;
 			}
