@@ -121,7 +121,7 @@ public:
 
 	enum try_read_result try_read_network() {
 		enum try_read_result gotdata = READ_NO_DATA_RECEIVED;
-		int buf[255];
+		char buf[255];
 		int n;
 		do {
 			n = read(sfd, buf, 255);
